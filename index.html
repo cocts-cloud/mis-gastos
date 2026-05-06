@@ -570,7 +570,11 @@ let entries=[],budgets={},savingsGoal=null,accountConfigs={};
 let selCat='comida',selType='personal',selFixed='variable',entryMode='expense',displayCurrency='ARS';
 let currentUser=null,accessToken=null,sheetId=null,tokenClient=null;
 
-const ekey=k=>`fin4_${(currentUser?.email||'').replace(/[^a-z0-9]/gi,'_')}_${k}`;
+// CLAVE FIJA — nunca cambiar este prefijo en updates futuros
+// Los datos viven en Google Sheets (fuente de verdad) y en localStorage (caché)
+// Actualizar el index.html NO borra los datos — el Sheet persiste siempre
+const LS_PREFIX='mf_v1';
+const ekey=k=>`${LS_PREFIX}_${(currentUser?.email||'').replace(/[^a-z0-9]/gi,'_')}_${k}`;
 const lsGet=k=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):null}catch{return null}};
 const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}};
 const fmt=(a,c)=>(c==='USD'?'U$D ':'$ ')+Math.round(Math.abs(a)).toLocaleString('es-AR');
@@ -587,13 +591,48 @@ function showLogin(){document.getElementById('loader').classList.add('hidden');d
 function handleCredential(r){const p=parseJwt(r.credential);currentUser={name:p.name,email:p.email,picture:p.picture};initTC();}
 function initTC(){tokenClient=google.accounts.oauth2.initTokenClient({client_id:CLIENT_ID,scope:SCOPES,callback:tr=>{if(tr.error)return;accessToken=tr.access_token;onAuth();}});tokenClient.requestAccessToken({prompt:''});}
 async function onAuth(){
-  document.getElementById('loader').classList.remove('hidden');document.getElementById('login-screen').style.display='none';
-  entries=lsGet(ekey('e'))||[];budgets=lsGet(ekey('b'))||{};savingsGoal=lsGet(ekey('s'));accountConfigs=lsGet(ekey('a'))||{};sheetId=lsGet(ekey('sh'));
+  document.getElementById('loader').classList.remove('hidden');
+  document.getElementById('login-screen').style.display='none';
+
+  // Migrar datos de versiones anteriores si existen en localStorage
+  migrateOldKeys();
+
+  // Caché local — carga instantánea
+  entries=lsGet(ekey('e'))||[];
+  budgets=lsGet(ekey('b'))||{};
+  savingsGoal=lsGet(ekey('s'));
+  accountConfigs=lsGet(ekey('a'))||{};
+  sheetId=lsGet(ekey('sh'));
+
   renderAvatar();renderCatGrid();populateAccSels();
   document.getElementById('f-date').value=new Date().toISOString().split('T')[0];
   buildMonthOpts();renderHome();renderAccountsPage();
-  document.getElementById('loader').classList.add('hidden');document.getElementById('app-shell').classList.add('visible');
-  await ensureSheet();await pullFromSheet();
+  document.getElementById('loader').classList.add('hidden');
+  document.getElementById('app-shell').classList.add('visible');
+
+  // Google Sheets = fuente de verdad — siempre sincroniza al iniciar
+  await ensureSheet();
+  await pullFromSheet();
+}
+
+// Migración de claves viejas (fin_, fin2_, fin3_, fin4_) a clave fija mf_v1
+// Se corre una sola vez por usuario, no borra nada
+function migrateOldKeys(){
+  const email=(currentUser?.email||'').replace(/[^a-z0-9]/gi,'_');
+  const oldPrefixes=['fin_','fin2_','fin3_','fin4_'];
+  const shorts=['e','b','s','a','sh'];
+  for(const prefix of oldPrefixes){
+    for(const s of shorts){
+      const oldKey=`${prefix}${email}_${s}`;
+      const newKey=`${LS_PREFIX}_${email}_${s}`;
+      try{
+        if(!localStorage.getItem(newKey)&&localStorage.getItem(oldKey)){
+          localStorage.setItem(newKey,localStorage.getItem(oldKey));
+          console.log(`Migrado: ${oldKey} -> ${newKey}`);
+        }
+      }catch{}
+    }
+  }
 }
 
 // SHEETS
