@@ -27,6 +27,17 @@
 html{height:100%;background:var(--bg)}
 body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;-webkit-font-smoothing:antialiased;letter-spacing:-.01em}
 
+/* FCI AGENT */
+.fci-filters{display:flex;gap:5px;margin:10px 0 6px;flex-wrap:wrap}
+.fci-row{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px}
+.fci-row:last-child{border-bottom:none}
+.fci-name{color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fci-sub{font-size:9px;color:var(--text3);letter-spacing:.04em;text-transform:uppercase}
+.fci-num{font-family:var(--mono);font-size:11px;text-align:right;min-width:52px}
+.fci-num.pos{color:var(--green)}.fci-num.neg{color:var(--red)}
+.fci-hdr{font-size:9px;color:var(--text3);letter-spacing:.06em;text-transform:uppercase;font-weight:600}
+.fci-note{font-size:10px;color:var(--text3);line-height:1.5;margin-top:8px}
+
 /* LOADER */
 #loader{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;z-index:300}
 #loader.hidden{display:none}
@@ -453,6 +464,24 @@ select option{background:var(--bg3)}
       <div class="ai-chips" id="ai-chips"></div>
       <button class="ai-run-btn" onclick="runAnalysis()">✦ Analizar mis finanzas</button>
     </div>
+    <div class="ai-card" id="fci-card">
+      <div class="ai-label">Agente FCI · Galicia (Fima) &amp; Macro (Pionero)</div>
+      <div class="form-row form-group">
+        <div><label class="form-label">Monto a invertir</label><input type="number" id="fci-amount" placeholder="0"></div>
+        <div><label class="form-label">Moneda</label><select id="fci-cur"><option value="ARS">ARS</option><option value="USD">USD</option></select></div>
+      </div>
+      <div class="form-row form-group">
+        <div><label class="form-label">Horizonte</label><select id="fci-horizon"><option value="6">6 meses</option><option value="12">12 meses</option></select></div>
+        <div><label class="form-label">Perfil</label><select id="fci-profile"><option value="conservador">Conservador</option><option value="moderado" selected>Moderado</option><option value="agresivo">Agresivo</option></select></div>
+      </div>
+      <div class="fci-filters" id="fci-filters"></div>
+      <div id="fci-list"><div class="fci-note">Tocá "Cargar fondos" para traer las cuotapartes publicadas en CAFCI.</div></div>
+      <button class="ai-run-btn" onclick="loadFCI(true)">↻ Cargar fondos</button>
+      <div class="ai-output" id="fci-output" style="margin-top:12px"></div>
+      <div class="ai-chips" id="fci-chips"></div>
+      <button class="ai-run-btn" onclick="runFCIAgent()">✦ Analizar fondos para mí</button>
+      <div class="fci-note">Rendimientos pasados no garantizan rendimientos futuros. Esto es una herramienta de análisis, no asesoramiento financiero profesional. Verificá reglamento de gestión, comisiones y plazo de rescate en Galicia / Macro antes de suscribir.</div>
+    </div>
     <div class="card">
       <div class="card-hdr"><div class="card-title">Presupuestos</div><div class="card-action" onclick="showModal('budget-modal')">+ Agregar</div></div>
       <div id="budget-list"></div>
@@ -695,7 +724,7 @@ function nav(id){
   const T={home:'Inicio',accounts:'Cuentas',add:'Nuevo',analysis:'Análisis',history:'Historial'};
   document.getElementById('topbar-title').textContent=T[id]||'';
   if(id==='home')renderHome();if(id==='accounts')renderAccountsPage();
-  if(id==='analysis'){renderBudgets();renderSavings();}if(id==='history'){buildMonthOpts();renderHistory();}
+  if(id==='analysis'){renderBudgets();renderSavings();if(fciFunds.length)renderFCI();}if(id==='history'){buildMonthOpts();renderHistory();}
 }
 
 // HOME
@@ -886,6 +915,91 @@ async function promptAI(p){
   const cur=displayCurrency,ym=thisMonth(),me=getMonthE(ym).filter(e=>e.currency===cur);
   const tI=me.filter(e=>e.mode==='income').reduce((s,e)=>s+e.amount,0),tE=me.filter(e=>e.mode==='expense').reduce((s,e)=>s+e.amount,0);
   try{const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:600,messages:[{role:'user',content:`Finanzas mayo 2026 en ${cur}: ingresos ${tI.toFixed(0)}, gastos ${tE.toFixed(0)}, saldo ${(tI-tE).toFixed(0)}. ${p}. Máx 120 palabras.`}]})});const data=await res.json();out.textContent=data.content?.find(b=>b.type==='text')?.text||'Sin respuesta.';}catch{out.textContent='Error al consultar la IA.';}
+}
+
+// FCI AGENT — fondos de Galicia (Fima) y Macro (Pionero) vía ArgentinaDatos (datos CAFCI)
+const FCI_API='https://api.argentinadatos.com/v1/finanzas/fci';
+const FCI_TIPOS={mercadoDinero:'Money market',rentaFija:'Renta fija',rentaMixta:'Renta mixta',rentaVariable:'Renta variable',otros:'Otros'};
+const FCI_BANKS=[{bank:'Galicia',re:/\bfima\b/i},{bank:'Macro',re:/\bpionero\b|\bmacro\b/i}];
+let fciFunds=[],fciFilter='all',fciHistory=[];
+const escH=t=>String(t??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fciDate=d=>`${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`;
+const fciBank=name=>FCI_BANKS.find(b=>b.re.test(name||''))?.bank;
+const fciIsUSD=name=>/d[oó]lar|usd|u\$s|\bdol\b/i.test(name||'');
+async function fciGet(path){const r=await fetch(`${FCI_API}/${path}`);if(!r.ok)throw new Error(r.status);const d=await r.json();return Array.isArray(d)?d:[];}
+// Busca la cuotaparte más cercana (hacia atrás) a una fecha: fines de semana y feriados no publican.
+async function fciGetAround(tipo,date){
+  for(let i=0;i<7;i++){const d=new Date(date);d.setDate(d.getDate()-i);try{const rows=await fciGet(`${tipo}/${fciDate(d)}`);if(rows.some(x=>x.vcp))return rows;}catch{}}
+  return [];
+}
+async function loadFCI(force){
+  const list=document.getElementById('fci-list'),cacheKey=`${LS_PREFIX}_fci_cache`;
+  const cached=lsGet(cacheKey);
+  if(!force&&cached?.day===fciDate(new Date())&&cached.funds?.length){fciFunds=cached.funds;renderFCI();return;}
+  list.innerHTML='<div class="fci-note">Cargando fondos de Galicia y Macro...</div>';
+  try{
+    const out=[];
+    await Promise.all(Object.keys(FCI_TIPOS).map(async tipo=>{
+      const last=(await fciGet(`${tipo}/ultimo`)).filter(x=>x.vcp&&fciBank(x.fondo));
+      if(!last.length)return;
+      const ref=new Date(last.map(x=>x.fecha).sort().pop()+'T12:00:00');
+      const back=n=>{const d=new Date(ref);d.setDate(d.getDate()-n);return d;};
+      const [h30,h180]=await Promise.all([fciGetAround(tipo,back(30)),fciGetAround(tipo,back(180))]);
+      const idx=rows=>Object.fromEntries(rows.filter(x=>x.vcp).map(x=>[x.fondo,x]));
+      const i30=idx(h30),i180=idx(h180);
+      const rend=(now,old)=>{if(!old?.vcp)return null;const days=(new Date(now.fecha)-new Date(old.fecha))/864e5;if(days<=0)return null;const r=now.vcp/old.vcp-1;return{r,tna:r*365/days,days:Math.round(days)};};
+      last.forEach(x=>out.push({fondo:x.fondo,bank:fciBank(x.fondo),tipo,usd:fciIsUSD(x.fondo),horizonte:x.horizonte||'',fecha:x.fecha,vcp:x.vcp,patrimonio:x.patrimonio||0,r30:rend(x,i30[x.fondo]),r180:rend(x,i180[x.fondo])}));
+    }));
+    if(!out.length)throw new Error('sin datos');
+    fciFunds=out.sort((a,b)=>(b.patrimonio||0)-(a.patrimonio||0));
+    lsSet(cacheKey,{day:fciDate(new Date()),funds:fciFunds});
+    renderFCI();
+  }catch(e){
+    if(cached?.funds?.length){fciFunds=cached.funds;renderFCI();list.insertAdjacentHTML('afterbegin','<div class="fci-note">No se pudo actualizar; mostrando la última carga.</div>');}
+    else list.innerHTML='<div class="fci-note">No se pudieron cargar los fondos (API de ArgentinaDatos no disponible). Probá de nuevo más tarde.</div>';
+  }
+}
+function setFCIFilter(f){fciFilter=f;renderFCI();}
+function fciVisible(){
+  const cur=document.getElementById('fci-cur').value;
+  return fciFunds.filter(f=>(cur==='USD')===f.usd&&(fciFilter==='all'||f.bank===fciFilter||f.tipo===fciFilter));
+}
+function renderFCI(){
+  const filters=[['all','Todos'],['Galicia','Galicia'],['Macro','Macro'],...Object.entries(FCI_TIPOS)];
+  document.getElementById('fci-filters').innerHTML=filters.map(([k,l])=>`<span class="ai-chip" style="${fciFilter===k?'background:var(--accent-glow)':''}" onclick="setFCIFilter('${k}')">${l}</span>`).join('');
+  const rows=fciVisible(),pct=v=>v==null?'—':(v*100).toFixed(1)+'%',cls=v=>v==null?'':v>=0?'pos':'neg';
+  if(!rows.length){document.getElementById('fci-list').innerHTML='<div class="fci-note">No hay fondos para este filtro y moneda.</div>';return;}
+  document.getElementById('fci-list').innerHTML=`<div class="fci-row"><div class="fci-hdr">Fondo</div><div class="fci-hdr fci-num">TNA 30d</div><div class="fci-hdr fci-num">Rend 6m</div></div>`+
+    rows.slice(0,40).map(f=>`<div class="fci-row"><div style="min-width:0"><div class="fci-name">${escH(f.fondo)}</div><div class="fci-sub">${f.bank} · ${FCI_TIPOS[f.tipo]}${f.horizonte?' · '+escH(f.horizonte):''}</div></div><div class="fci-num ${cls(f.r30?.tna)}">${pct(f.r30?.tna)}</div><div class="fci-num ${cls(f.r180?.r)}">${pct(f.r180?.r)}</div></div>`).join('')+
+    `<div class="fci-note">Datos al ${escH(rows[0].fecha)} · fuente CAFCI vía ArgentinaDatos. TNA 30d = rendimiento de los últimos 30 días anualizado.</div>`;
+}
+async function askFCIAgent(userMsg){
+  const out=document.getElementById('fci-output');
+  fciHistory.push({role:'user',content:userMsg});
+  try{
+    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1200,
+      system:'Sos un analista de fondos comunes de inversión (FCI) en Argentina, especializado en los fondos Fima (Banco Galicia) y Pionero (Banco Macro). Analizás con los datos provistos, sin inventar cifras. Comparás contra inflación esperada, plazo fijo y caución cuando sea relevante, y explicás riesgo, liquidez (plazo de rescate), volatilidad y costos. Si el usuario pregunta por trading vs FCI, respondé con honestidad: la mayoría de los traders minoristas rinden por debajo de un índice o fondo tras comisiones, spreads e impuestos. Siempre aclarás que no es asesoramiento profesional. Respondé en español rioplatense, directo, sin markdown pesado.',
+      messages:fciHistory})});
+    const data=await res.json();const txt=data.content?.find(b=>b.type==='text')?.text||'Sin respuesta.';
+    fciHistory.push({role:'assistant',content:txt});out.textContent=txt;
+    document.getElementById('fci-chips').innerHTML=['¿Trading o FCI a 6-12 meses?','¿Cómo armo una cartera combinada?','¿Qué riesgos tiene cada fondo?','¿Conviene más que un plazo fijo?'].map(t=>`<span class="ai-chip" onclick="askFCIAgent('${t}')">${t}</span>`).join('');
+  }catch{fciHistory.pop();out.textContent='Error al consultar la IA.';}
+}
+async function runFCIAgent(){
+  const out=document.getElementById('fci-output');
+  if(!fciFunds.length)await loadFCI(false);
+  const cur=document.getElementById('fci-cur').value,amount=parseFloat(document.getElementById('fci-amount').value)||0;
+  const horizon=document.getElementById('fci-horizon').value,profile=document.getElementById('fci-profile').value;
+  const funds=fciFunds.filter(f=>(cur==='USD')===f.usd).slice(0,40);
+  if(!funds.length){out.textContent='No hay datos de fondos cargados para '+cur+'.';return;}
+  out.textContent='Analizando fondos...';fciHistory=[];
+  const p=v=>v==null?'s/d':(v*100).toFixed(2)+'%';
+  const table=funds.map(f=>`${f.fondo} | ${f.bank} | ${FCI_TIPOS[f.tipo]} | horiz:${f.horizonte||'s/d'} | TNA30d:${p(f.r30?.tna)} | rend6m:${p(f.r180?.r)} | patrimonio:${Math.round(f.patrimonio/1e6)}M`).join('\n');
+  await askFCIAgent(`Fecha de datos: ${funds[0].fecha}. Quiero invertir ${amount?fmt(amount,cur):'un monto a definir'} en ${cur}, horizonte ${horizon} meses, perfil ${profile}.
+Fondos disponibles (Fima=Galicia, Pionero=Macro):
+${table}
+
+1) Recomendá 2-4 fondos con % de asignación sugerido y por qué. 2) Señalá riesgos y plazo de rescate a verificar. 3) Compará brevemente contra hacer trading activo en ese horizonte. Máx 250 palabras.`);
 }
 
 // MODALS
