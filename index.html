@@ -31,6 +31,10 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:1
 .fci-filters{display:flex;gap:5px;margin:10px 0 6px;flex-wrap:wrap}
 .fci-row{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px}
 .fci-row:last-child{border-bottom:none}
+.fci-row4{grid-template-columns:1fr auto auto auto}
+.fci-row3{grid-template-columns:1fr auto auto}
+.fci-bench{font-size:10px;color:var(--text2);line-height:1.6;margin:4px 0 6px}
+.fci-bench b{color:var(--text);font-weight:600}
 .fci-name{color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fci-sub{font-size:9px;color:var(--text3);letter-spacing:.04em;text-transform:uppercase}
 .fci-num{font-family:var(--mono);font-size:11px;text-align:right;min-width:52px}
@@ -468,15 +472,21 @@ select option{background:var(--bg3)}
       <div class="ai-label">Agente FCI · Galicia (Fima) &amp; Macro (Pionero)</div>
       <div class="form-row form-group">
         <div><label class="form-label">Monto a invertir</label><input type="number" id="fci-amount" placeholder="0"></div>
-        <div><label class="form-label">Moneda</label><select id="fci-cur"><option value="ARS">ARS</option><option value="USD">USD</option></select></div>
+        <div><label class="form-label">Moneda</label><select id="fci-cur" onchange="if(fciFunds.length)renderFCI()"><option value="ARS">ARS</option><option value="USD">USD</option></select></div>
       </div>
       <div class="form-row form-group">
         <div><label class="form-label">Horizonte</label><select id="fci-horizon"><option value="6">6 meses</option><option value="12">12 meses</option></select></div>
-        <div><label class="form-label">Perfil</label><select id="fci-profile"><option value="conservador">Conservador</option><option value="moderado" selected>Moderado</option><option value="agresivo">Agresivo</option></select></div>
+        <div><label class="form-label">Perfil</label><select id="fci-profile" onchange="if(fciFunds.length)renderFCI()"><option value="conservador" selected>Conservador</option><option value="moderado">Moderado</option><option value="agresivo">Agresivo</option></select></div>
       </div>
+      <div class="fci-bench" id="fci-bench"></div>
       <div class="fci-filters" id="fci-filters"></div>
-      <div id="fci-list"><div class="fci-note">Tocá "Cargar fondos" para traer las cuotapartes publicadas en CAFCI.</div></div>
+      <div id="fci-list"><div class="fci-note">Tocá "Cargar fondos" para traer 12 meses de cuotapartes publicadas en CAFCI (la primera carga del día tarda unos segundos).</div></div>
       <button class="ai-run-btn" onclick="loadFCI(true)">↻ Cargar fondos</button>
+      <div class="form-row" style="margin-top:12px;align-items:end">
+        <div><label class="form-label">Si hubiera invertido hace</label><select id="fci-sim-months"><option value="3">3 meses</option><option value="6">6 meses</option><option value="9" selected>9 meses</option><option value="12">12 meses</option></select></div>
+        <button class="ai-run-btn" style="margin-top:0" onclick="runFCISim()">Simular</button>
+      </div>
+      <div id="fci-sim"></div>
       <div class="ai-output" id="fci-output" style="margin-top:12px"></div>
       <div class="ai-chips" id="fci-chips"></div>
       <button class="ai-run-btn" onclick="runFCIAgent()">✦ Analizar fondos para mí</button>
@@ -918,71 +928,143 @@ async function promptAI(p){
 }
 
 // FCI AGENT — fondos de Galicia (Fima) y Macro (Pionero) vía ArgentinaDatos (datos CAFCI)
-const FCI_API='https://api.argentinadatos.com/v1/finanzas/fci';
-const FCI_TIPOS={mercadoDinero:'Money market',rentaFija:'Renta fija',rentaMixta:'Renta mixta',rentaVariable:'Renta variable',otros:'Otros'};
+const AD_API='https://api.argentinadatos.com/v1';
+const FCI_API=`${AD_API}/finanzas/fci`;
+const FCI_TIPOS={mercadoDinero:'Money market',rentaFija:'Renta fija',rentaMixta:'Renta mixta',rentaVariable:'Renta variable'};
 const FCI_BANKS=[{bank:'Galicia',re:/\bfima\b/i},{bank:'Macro',re:/\bpionero\b|\bmacro\b/i}];
-let fciFunds=[],fciFilter='all',fciHistory=[];
+const FCI_CACHE_KEY='mf_v1_fci_cache_v2';
+let fciFunds=[],fciBenchData=null,fciFilter='apto',fciHistory=[];
 const escH=t=>String(t??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fciDate=d=>`${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`;
+const fciShift=(d,days)=>{const x=new Date(d);x.setDate(x.getDate()-days);return x;};
+const fciMonthBack=(d,m)=>fciShift(d,Math.round(m*30.44));
 const fciBank=name=>FCI_BANKS.find(b=>b.re.test(name||''))?.bank;
 const fciIsUSD=name=>/d[oó]lar|usd|u\$s|\bdol\b/i.test(name||'');
-async function fciGet(path){const r=await fetch(`${FCI_API}/${path}`);if(!r.ok)throw new Error(r.status);const d=await r.json();return Array.isArray(d)?d:[];}
-// Busca la cuotaparte más cercana (hacia atrás) a una fecha: fines de semana y feriados no publican.
-async function fciGetAround(tipo,date){
-  for(let i=0;i<7;i++){const d=new Date(date);d.setDate(d.getDate()-i);try{const rows=await fciGet(`${tipo}/${fciDate(d)}`);if(rows.some(x=>x.vcp))return rows;}catch{}}
-  return [];
+const fciBase=name=>String(name).replace(/\s*-\s*clase.*$/i,'');
+const fciPct=(v,d=1)=>v==null?'—':(v*100).toFixed(d)+'%';
+async function fciGet(path){const r=await fetch(`${FCI_API}/${path}`);if(r.status===404)return [];if(!r.ok)throw new Error(r.status);const d=await r.json();return Array.isArray(d)?d.filter(x=>x&&x.vcp):[];}
+// Ejecuta tareas con concurrencia limitada; una tarea que falla devuelve [].
+async function fciPool(tasks,n,onProgress){const out=[];let i=0,done=0;await Promise.all(Array.from({length:n},async()=>{while(i<tasks.length){const k=i++;out[k]=await tasks[k]().catch(()=>[]);done++;onProgress?.(done,tasks.length);}}));return out;}
+// Valor más cercano (hacia atrás, hasta 12 días) a una fecha objetivo.
+function fciPick(ser,tgt){let best=null;for(const[f,v]of Object.entries(ser||{})){const d=new Date(f+'T12:00:00'),diff=(tgt-d)/864e5;if(diff>=-0.5&&diff<=12&&(!best||d>best.d))best={d,v};}return best;}
+async function fciLoadBench(ref){
+  const get=p=>fetch(`${AD_API}/${p}`).then(r=>r.ok?r.json():[]).catch(()=>[]);
+  const [inf,mep,pf]=await Promise.all([get('finanzas/indices/inflacion'),get('cotizaciones/dolares/bolsa'),get('finanzas/tasas/plazoFijo')]);
+  const b={inf:{},mep:{},pf:{},infHasta:null};
+  const infS=(Array.isArray(inf)?inf:[]).filter(x=>x.valor!=null).sort((a,c)=>a.fecha.localeCompare(c.fecha));
+  b.infHasta=infS.at(-1)?.fecha?.slice(0,7)||null;
+  const mepS=(Array.isArray(mep)?mep:[]).filter(x=>x.venta).sort((a,c)=>a.fecha.localeCompare(c.fecha));
+  const mepAt=d=>{const iso=d.toISOString().slice(0,10);let v=null;for(const x of mepS){if(x.fecha.slice(0,10)<=iso)v=x.venta;else break;}return v;};
+  const mepNow=mepAt(ref);
+  [1,3,6,9,12].forEach(m=>{
+    const last=infS.slice(-m);if(last.length===m)b.inf[m]=last.reduce((a,x)=>a*(1+x.valor/100),1)-1;
+    const then=mepAt(fciMonthBack(ref,m));if(mepNow&&then)b.mep[m]=mepNow/then-1;
+  });
+  (Array.isArray(pf)?pf:[]).forEach(x=>{if(/GALICIA/i.test(x.entidad))b.pf.Galicia=x.tnaClientes;if(/MACRO/i.test(x.entidad))b.pf.Macro=x.tnaClientes;});
+  return b;
 }
 async function loadFCI(force){
-  const list=document.getElementById('fci-list'),cacheKey=`${LS_PREFIX}_fci_cache`;
-  const cached=lsGet(cacheKey);
-  if(!force&&cached?.day===fciDate(new Date())&&cached.funds?.length){fciFunds=cached.funds;renderFCI();return;}
+  const list=document.getElementById('fci-list'),cached=lsGet(FCI_CACHE_KEY),todayKey=fciDate(new Date());
+  if(!force&&cached?.day===todayKey&&cached.funds?.length){fciFunds=cached.funds;fciBenchData=cached.bench;renderFCI();return;}
   list.innerHTML='<div class="fci-note">Cargando fondos de Galicia y Macro...</div>';
   try{
-    const out=[];
-    await Promise.all(Object.keys(FCI_TIPOS).map(async tipo=>{
-      const last=(await fciGet(`${tipo}/ultimo`)).filter(x=>x.vcp&&fciBank(x.fondo));
-      if(!last.length)return;
-      const ref=new Date(last.map(x=>x.fecha).sort().pop()+'T12:00:00');
-      const back=n=>{const d=new Date(ref);d.setDate(d.getDate()-n);return d;};
-      const [h30,h180]=await Promise.all([fciGetAround(tipo,back(30)),fciGetAround(tipo,back(180))]);
-      const idx=rows=>Object.fromEntries(rows.filter(x=>x.vcp).map(x=>[x.fondo,x]));
-      const i30=idx(h30),i180=idx(h180);
-      const rend=(now,old)=>{if(!old?.vcp)return null;const days=(new Date(now.fecha)-new Date(old.fecha))/864e5;if(days<=0)return null;const r=now.vcp/old.vcp-1;return{r,tna:r*365/days,days:Math.round(days)};};
-      last.forEach(x=>out.push({fondo:x.fondo,bank:fciBank(x.fondo),tipo,usd:fciIsUSD(x.fondo),horizonte:x.horizonte||'',fecha:x.fecha,vcp:x.vcp,patrimonio:x.patrimonio||0,r30:rend(x,i30[x.fondo]),r180:rend(x,i180[x.fondo])}));
-    }));
-    if(!out.length)throw new Error('sin datos');
-    fciFunds=out.sort((a,b)=>(b.patrimonio||0)-(a.patrimonio||0));
-    lsSet(cacheKey,{day:fciDate(new Date()),funds:fciFunds});
+    const tipos=Object.keys(FCI_TIPOS);
+    const last=(await Promise.all(tipos.map(t=>fciGet(`${t}/ultimo`).then(rows=>rows.map(x=>({...x,tipo:t})))))).flat().filter(x=>fciBank(x.fondo));
+    if(!last.length)throw new Error('sin datos');
+    const ref=new Date(last.map(x=>x.fecha.slice(0,10)).sort().pop()+'T12:00:00');
+    // La API publica cada día solo una parte de los fondos: se juntan varios días hábiles
+    // antes de cada mes objetivo para reconstruir la serie mensual de cada fondo.
+    const tasks=[];
+    tipos.forEach(t=>{for(let m=1;m<=12;m++){const tgt=fciMonthBack(ref,m);for(let i=0;i<11;i++){const d=fciShift(tgt,i);if(d.getDay()%6)tasks.push(()=>fciGet(`${t}/${fciDate(d)}`));}}});
+    const [hist,bench]=await Promise.all([
+      fciPool(tasks,8,(n,tot)=>{list.innerHTML=`<div class="fci-note">Reconstruyendo historial de 12 meses... ${Math.round(n/tot*100)}%</div>`;}),
+      fciLoadBench(ref)]);
+    const series={};
+    hist.flat().forEach(x=>{if(fciBank(x.fondo))(series[x.fondo]??={})[x.fecha.slice(0,10)]=x.vcp;});
+    const byBase={};
+    last.forEach(x=>{
+      const own=new Date(x.fecha.slice(0,10)+'T12:00:00');
+      if((ref-own)/864e5>7)return; // fondo sin publicar hace más de una semana
+      const ser=series[x.fondo]||{};
+      const vals=[x.vcp];for(let m=1;m<=12;m++)vals.push(fciPick(ser,fciMonthBack(ref,m))?.v??null);
+      const r=m=>vals[m]?x.vcp/vals[m]-1:null;
+      const monthly=[];for(let m=0;m<12;m++)if(vals[m]&&vals[m+1])monthly.push(vals[m]/vals[m+1]-1);
+      const f={fondo:x.fondo,base:fciBase(x.fondo),bank:fciBank(x.fondo),tipo:x.tipo,usd:fciIsUSD(x.fondo),horizonte:x.horizonte||'',fecha:x.fecha.slice(0,10),vcp:x.vcp,patrimonio:x.patrimonio||0,
+        vals,r1:r(1),r3:r(3),r6:r(6),r12:r(12),worst:monthly.length?Math.min(...monthly):null,neg:monthly.filter(v=>v<0).length,nm:monthly.length};
+      // Una sola clase por fondo: Clase A (la minorista) si existe.
+      const k=f.base+'|'+f.tipo,prev=byBase[k],isA=/clase\s+a\b/i.test(f.fondo)||!/clase/i.test(f.fondo);
+      if(!prev||(isA&&!/clase\s+a\b/i.test(prev.fondo)&&/clase/i.test(prev.fondo)))byBase[k]=f;
+    });
+    fciFunds=Object.values(byBase).sort((a,b)=>(b.r6??-9)-(a.r6??-9));
+    fciBenchData=bench;
+    lsSet(FCI_CACHE_KEY,{day:todayKey,funds:fciFunds,bench});
     renderFCI();
   }catch(e){
-    if(cached?.funds?.length){fciFunds=cached.funds;renderFCI();list.insertAdjacentHTML('afterbegin','<div class="fci-note">No se pudo actualizar; mostrando la última carga.</div>');}
+    if(cached?.funds?.length){fciFunds=cached.funds;fciBenchData=cached.bench;renderFCI();list.insertAdjacentHTML('afterbegin','<div class="fci-note">No se pudo actualizar; mostrando la última carga.</div>');}
     else list.innerHTML='<div class="fci-note">No se pudieron cargar los fondos (API de ArgentinaDatos no disponible). Probá de nuevo más tarde.</div>';
   }
 }
+// Reglas de perfil: conservador = money market y renta fija de corto plazo sin meses negativos.
+function fciApto(f,profile){
+  if(profile==='agresivo')return true;
+  if(f.nm<3)return false; // sin historial suficiente no se puede evaluar el riesgo
+  if(profile==='conservador')return(f.tipo==='mercadoDinero'||(f.tipo==='rentaFija'&&/corto/i.test(f.horizonte)))&&(f.worst==null||f.worst>=0);
+  return f.tipo!=='rentaVariable'&&(f.worst==null||f.worst>=-0.02);
+}
 function setFCIFilter(f){fciFilter=f;renderFCI();}
 function fciVisible(){
-  const cur=document.getElementById('fci-cur').value;
-  return fciFunds.filter(f=>(cur==='USD')===f.usd&&(fciFilter==='all'||f.bank===fciFilter||f.tipo===fciFilter));
+  const cur=document.getElementById('fci-cur').value,profile=document.getElementById('fci-profile').value;
+  return fciFunds.filter(f=>(cur==='USD')===f.usd&&(fciFilter==='all'||(fciFilter==='apto'&&fciApto(f,profile))||f.bank===fciFilter||f.tipo===fciFilter));
+}
+function renderFCIBench(){
+  const b=fciBenchData,el=document.getElementById('fci-bench');
+  if(!b){el.innerHTML='';return;}
+  const pf=Object.entries(b.pf).map(([k,v])=>`${k} ${fciPct(v)}`).join(' · ');
+  el.innerHTML=`Referencias · Inflación 6m <b>${fciPct(b.inf[6])}</b> · 12m <b>${fciPct(b.inf[12])}</b>${b.infHasta?` (hasta ${escH(b.infHasta)})`:''} · Dólar MEP 6m <b>${fciPct(b.mep[6])}</b> · 12m <b>${fciPct(b.mep[12])}</b>${pf?` · Plazo fijo TNA ${pf}`:''}`;
 }
 function renderFCI(){
-  const filters=[['all','Todos'],['Galicia','Galicia'],['Macro','Macro'],...Object.entries(FCI_TIPOS)];
+  const filters=[['apto','Aptos para mi perfil'],['all','Todos'],['Galicia','Galicia'],['Macro','Macro'],...Object.entries(FCI_TIPOS)];
   document.getElementById('fci-filters').innerHTML=filters.map(([k,l])=>`<span class="ai-chip" style="${fciFilter===k?'background:var(--accent-glow)':''}" onclick="setFCIFilter('${k}')">${l}</span>`).join('');
-  const rows=fciVisible(),pct=v=>v==null?'—':(v*100).toFixed(1)+'%',cls=v=>v==null?'':v>=0?'pos':'neg';
+  renderFCIBench();
+  const profile=document.getElementById('fci-profile').value,rows=fciVisible(),cls=v=>v==null?'':v>=0?'pos':'neg';
   if(!rows.length){document.getElementById('fci-list').innerHTML='<div class="fci-note">No hay fondos para este filtro y moneda.</div>';return;}
-  document.getElementById('fci-list').innerHTML=`<div class="fci-row"><div class="fci-hdr">Fondo</div><div class="fci-hdr fci-num">TNA 30d</div><div class="fci-hdr fci-num">Rend 6m</div></div>`+
-    rows.slice(0,40).map(f=>`<div class="fci-row"><div style="min-width:0"><div class="fci-name">${escH(f.fondo)}</div><div class="fci-sub">${f.bank} · ${FCI_TIPOS[f.tipo]}${f.horizonte?' · '+escH(f.horizonte):''}</div></div><div class="fci-num ${cls(f.r30?.tna)}">${pct(f.r30?.tna)}</div><div class="fci-num ${cls(f.r180?.r)}">${pct(f.r180?.r)}</div></div>`).join('')+
-    `<div class="fci-note">Datos al ${escH(rows[0].fecha)} · fuente CAFCI vía ArgentinaDatos. TNA 30d = rendimiento de los últimos 30 días anualizado.</div>`;
+  document.getElementById('fci-list').innerHTML=`<div class="fci-row fci-row4"><div class="fci-hdr">Fondo</div><div class="fci-hdr fci-num">6 meses</div><div class="fci-hdr fci-num">12 meses</div><div class="fci-hdr fci-num">Peor mes</div></div>`+
+    rows.slice(0,40).map(f=>`<div class="fci-row fci-row4"><div style="min-width:0"><div class="fci-name">${escH(f.fondo)}</div><div class="fci-sub">${f.bank} · ${FCI_TIPOS[f.tipo]}${f.horizonte?' · '+escH(f.horizonte):''}${fciApto(f,profile)?' · <span style="color:var(--green)">✓ perfil</span>':''}</div></div><div class="fci-num ${cls(f.r6)}">${fciPct(f.r6)}</div><div class="fci-num ${cls(f.r12)}">${fciPct(f.r12)}</div><div class="fci-num ${cls(f.worst)}">${fciPct(f.worst)}</div></div>`).join('')+
+    `<div class="fci-note">Datos al ${escH(rows[0].fecha)} · fuente CAFCI vía ArgentinaDatos · una clase por fondo (Clase A cuando existe). "Peor mes" = peor rendimiento mensual de los últimos 12 meses.</div>`;
+}
+// "¿Cuánto tendría hoy si hubiera invertido X hace N meses?"
+function runFCISim(){
+  const out=document.getElementById('fci-sim'),cur=document.getElementById('fci-cur').value;
+  const amount=parseFloat(document.getElementById('fci-amount').value)||0,m=+document.getElementById('fci-sim-months').value;
+  if(!fciFunds.length){out.innerHTML='<div class="fci-note">Primero cargá los fondos.</div>';return;}
+  if(amount<=0){out.innerHTML='<div class="fci-note">Ingresá un monto a invertir.</div>';return;}
+  const rows=fciVisible().filter(f=>f.vals?.[m]).map(f=>({f,final:amount*f.vcp/f.vals[m]})).sort((a,b)=>b.final-a.final).slice(0,6);
+  if(!rows.length){out.innerHTML='<div class="fci-note">No hay historial suficiente para ese plazo.</div>';return;}
+  const inf=fciBenchData?.inf?.[m],mep=fciBenchData?.mep?.[m];
+  const line=(name,final,sub='')=>{const g=final-amount;return`<div class="fci-row fci-row3"><div style="min-width:0"><div class="fci-name">${name}</div>${sub?`<div class="fci-sub">${sub}</div>`:''}</div><div class="fci-num">${fmt(final,cur)}</div><div class="fci-num ${g>=0?'pos':'neg'}">${g>=0?'+':'−'}${fmt(g,cur)}</div></div>`;};
+  out.innerHTML=`<div class="fci-hdr" style="margin-top:12px">Si hubieras invertido ${fmt(amount,cur)} hace ${m} meses</div>`+
+    rows.map(({f,final})=>line(escH(f.fondo),final,`${f.bank} · ${FCI_TIPOS[f.tipo]}${inf!=null&&cur==='ARS'?` · real ${fciPct(final/amount/(1+inf)-1)}`:''}`)).join('')+
+    (cur==='ARS'&&mep!=null?line('Dólar MEP',amount*(1+mep)):'')+
+    (cur==='ARS'&&inf!=null?`<div class="fci-note">Para no perder contra la inflación (${fciPct(inf)} en los últimos ${m} meses publicados) necesitarías ${fmt(amount*(1+inf),cur)}. "Real" = ganancia descontada la inflación.</div>`:'');
 }
 async function askFCIAgent(userMsg){
   const out=document.getElementById('fci-output');
   fciHistory.push({role:'user',content:userMsg});
   try{
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1200,
-      system:'Sos un analista de fondos comunes de inversión (FCI) en Argentina, especializado en los fondos Fima (Banco Galicia) y Pionero (Banco Macro). Analizás con los datos provistos, sin inventar cifras. Comparás contra inflación esperada, plazo fijo y caución cuando sea relevante, y explicás riesgo, liquidez (plazo de rescate), volatilidad y costos. Si el usuario pregunta por trading vs FCI, respondé con honestidad: la mayoría de los traders minoristas rinden por debajo de un índice o fondo tras comisiones, spreads e impuestos. Siempre aclarás que no es asesoramiento profesional. Respondé en español rioplatense, directo, sin markdown pesado.',
+    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1500,
+      system:`Sos un analista de fondos comunes de inversión (FCI) en Argentina, especializado en los fondos Fima (Banco Galicia) y Pionero (Banco Macro). Reglas:
+- Usá solo los datos provistos; no inventes cifras. Si falta un dato, decilo.
+- Compará siempre contra la inflación (rendimiento real), el plazo fijo y el dólar MEP.
+- Respetá el perfil: conservador = money market y renta fija de corto plazo, sin fondos con meses negativos; moderado = puede sumar renta fija de mediano/largo plazo y algo de mixta; agresivo = puede incluir acciones.
+- Recomendá separar un fondo de emergencia en money market antes de invertir el resto.
+- Advertí que rendimientos pasados no garantizan futuros: si el último año rindió muy por encima de la inflación, aclarás que no es esperable repetirlo.
+- Sobre trading o cripto a 6-12 meses: la mayoría de los minoristas rinde por debajo de un fondo tras costos, y la volatilidad es alta.
+- Recordá verificar comisión, plazo de rescate, clase y test del inversor en el homebanking. No es asesoramiento profesional (sugerí un asesor matriculado CNV para montos grandes).
+Respondé en español rioplatense, directo, sin markdown pesado.`,
       messages:fciHistory})});
     const data=await res.json();const txt=data.content?.find(b=>b.type==='text')?.text||'Sin respuesta.';
     fciHistory.push({role:'assistant',content:txt});out.textContent=txt;
-    document.getElementById('fci-chips').innerHTML=['¿Trading o FCI a 6-12 meses?','¿Cómo armo una cartera combinada?','¿Qué riesgos tiene cada fondo?','¿Conviene más que un plazo fijo?'].map(t=>`<span class="ai-chip" onclick="askFCIAgent('${t}')">${t}</span>`).join('');
+    document.getElementById('fci-chips').innerHTML=['¿Trading, cripto o FCI a 6-12 meses?','¿Cómo reparto el monto?','¿Qué riesgos tiene cada fondo?','¿Conviene más que un plazo fijo UVA?'].map(t=>`<span class="ai-chip" onclick="askFCIAgent('${t}')">${t}</span>`).join('');
   }catch{fciHistory.pop();out.textContent='Error al consultar la IA.';}
 }
 async function runFCIAgent(){
@@ -990,16 +1072,17 @@ async function runFCIAgent(){
   if(!fciFunds.length)await loadFCI(false);
   const cur=document.getElementById('fci-cur').value,amount=parseFloat(document.getElementById('fci-amount').value)||0;
   const horizon=document.getElementById('fci-horizon').value,profile=document.getElementById('fci-profile').value;
-  const funds=fciFunds.filter(f=>(cur==='USD')===f.usd).slice(0,40);
+  const funds=fciFunds.filter(f=>(cur==='USD')===f.usd).slice(0,45);
   if(!funds.length){out.textContent='No hay datos de fondos cargados para '+cur+'.';return;}
   out.textContent='Analizando fondos...';fciHistory=[];
-  const p=v=>v==null?'s/d':(v*100).toFixed(2)+'%';
-  const table=funds.map(f=>`${f.fondo} | ${f.bank} | ${FCI_TIPOS[f.tipo]} | horiz:${f.horizonte||'s/d'} | TNA30d:${p(f.r30?.tna)} | rend6m:${p(f.r180?.r)} | patrimonio:${Math.round(f.patrimonio/1e6)}M`).join('\n');
+  const p=v=>v==null?'s/d':(v*100).toFixed(1)+'%',b=fciBenchData||{inf:{},mep:{},pf:{}};
+  const table=funds.map(f=>`${f.fondo} | ${f.bank} | ${FCI_TIPOS[f.tipo]} | horiz:${f.horizonte||'s/d'} | 1m:${p(f.r1)} 3m:${p(f.r3)} 6m:${p(f.r6)} 12m:${p(f.r12)} | peor mes:${p(f.worst)} | meses neg:${f.neg}/${f.nm} | patrimonio:${Math.round(f.patrimonio/1e6)}M | apto ${profile}:${fciApto(f,profile)?'sí':'no'}`).join('\n');
   await askFCIAgent(`Fecha de datos: ${funds[0].fecha}. Quiero invertir ${amount?fmt(amount,cur):'un monto a definir'} en ${cur}, horizonte ${horizon} meses, perfil ${profile}.
-Fondos disponibles (Fima=Galicia, Pionero=Macro):
+Referencias: inflación 3m ${p(b.inf[3])}, 6m ${p(b.inf[6])}, 12m ${p(b.inf[12])} (publicada hasta ${b.infHasta||'s/d'}); dólar MEP 6m ${p(b.mep[6])}, 12m ${p(b.mep[12])}; plazo fijo TNA ${Object.entries(b.pf).map(([k,v])=>k+' '+p(v)).join(', ')||'s/d'}.
+Fondos (Fima=Galicia, Pionero=Macro; Clase A cuando existe):
 ${table}
 
-1) Recomendá 2-4 fondos con % de asignación sugerido y por qué. 2) Señalá riesgos y plazo de rescate a verificar. 3) Compará brevemente contra hacer trading activo en ese horizonte. Máx 250 palabras.`);
+1) Recomendá 2-4 fondos aptos para mi perfil con % y monto sugerido, y por qué. 2) Rendimiento real esperable (contra inflación), sin prometer repetir el pasado. 3) Riesgos, plazo de rescate y qué verificar. 4) Una línea comparando con trading/cripto en este horizonte. Máx 300 palabras.`);
 }
 
 // MODALS
