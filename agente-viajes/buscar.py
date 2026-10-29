@@ -1,6 +1,6 @@
 """Búsqueda directa (sin IA) de vuelos premio de Air Europa.
 
-Los valores por defecto (Córdoba -> Valencia, 22/06 al 20/07/2027, 70.100 millas)
+Los valores por defecto (Córdoba -> Valencia, ida 24-30/06, vuelta hasta 15/07/2027, 70.100 millas)
 salen de config.py.
 
 Millas SUMA (aireuropa.com):
@@ -90,8 +90,8 @@ def main() -> None:
 
     r = sub.add_parser("repetir", help="Repetir la búsqueda SUMA capturada en un rango de fechas")
     r.add_argument("--tramo", default="ida", choices=["ida", "vuelta"])
-    r.add_argument("--desde", default=config.VENTANA_DESDE)
-    r.add_argument("--hasta", default=config.VENTANA_HASTA)
+    r.add_argument("--desde", help="Por defecto: ida IDA_DESDE, vuelta IDA_DESDE (config.py)")
+    r.add_argument("--hasta", help="Por defecto: ida IDA_HASTA, vuelta VUELTA_HASTA (config.py)")
     r.add_argument("--pausa", type=float, default=6.0, help="Segundos entre consultas")
 
     k = sub.add_parser("combinar", help="Combinar ida y vuelta SUMA dentro del saldo de millas")
@@ -116,7 +116,9 @@ def main() -> None:
         air_europa_web.capturar(a.tramo)
         return
     elif a.cmd == "repetir":
-        filas = air_europa_web.repetir(a.desde, a.hasta, a.pausa, a.tramo)
+        desde = a.desde or config.IDA_DESDE
+        hasta = a.hasta or (config.IDA_HASTA if a.tramo == "ida" else config.VUELTA_HASTA)
+        filas = air_europa_web.repetir(desde, hasta, a.pausa, a.tramo)
         imprimir(filas, ["fecha", "millas", "vuelo", "cabina", "tasas"])
         ruta = guardar(f"suma_{a.tramo}", filas)
     else:

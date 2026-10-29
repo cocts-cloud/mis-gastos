@@ -25,7 +25,7 @@ SISTEMA = f"""Sos un agente de viajes experto en canje de millas, especializado 
 Perfil del viajero (de config.py):
 - Saldo: {config.MILLAS_DISPONIBLES:,} millas {config.PROGRAMA} (programa propio de Air Europa).
 - Ruta: {config.ORIGEN} (Córdoba, Argentina) -> {config.DESTINO} (Valencia, España), ida y vuelta.
-- Ventana: salida desde {config.VENTANA_DESDE}, regreso a más tardar el {config.VENTANA_HASTA}.
+- Ventana: salida entre {config.IDA_DESDE} y {config.IDA_HASTA}, regreso a más tardar el {config.VUELTA_HASTA}.
 - Air Europa vuela directo Córdoba-Madrid y conecta a Valencia en Madrid, todo con UX.
 
 Cómo trabajar:

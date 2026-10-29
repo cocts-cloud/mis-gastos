@@ -2,14 +2,14 @@
 
 ## Tu viaje (config.py)
 
-**Córdoba (COR) → Valencia (VLC), ida y vuelta, entre el 22/06 y el 20/07/2027, con 70.100 millas SUMA.**
+**Córdoba (COR) → Valencia (VLC), ida entre el 24 y el 30/06/2027, vuelta hasta el 15/07/2027, con 70.100 millas SUMA.**
 Air Europa vuela directo Córdoba–Madrid y conecta con Valencia, así que todo el viaje se emite con SUMA.
 
 ```bash
 python buscar.py capturar --tramo ida      # en el navegador: SUMA, COR → VLC, solo ida, "pagar con millas"
 python buscar.py capturar --tramo vuelta   # VLC → COR, solo ida, "pagar con millas"
-python buscar.py repetir --tramo ida       # recorre del 22/06 al 20/07
-python buscar.py repetir --tramo vuelta
+python buscar.py repetir --tramo ida       # recorre del 24/06 al 30/06
+python buscar.py repetir --tramo vuelta    # recorre del 24/06 al 15/07
 python buscar.py combinar --min-dias 10    # pares ida+vuelta que entran en 70.100 millas
 python agente.py "¿Qué combinación me conviene?"
 ```
