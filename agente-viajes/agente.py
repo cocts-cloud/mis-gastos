@@ -2,7 +2,7 @@
 
 Uso:
   python agente.py
-  python agente.py "Quiero ir de Buenos Aires a Madrid en business, cualquier día de julio 2027"
+  python agente.py "¿Qué fechas me convienen para ir y volver con mis millas?"
 """
 
 from __future__ import annotations
@@ -13,33 +13,60 @@ import sys
 import anthropic
 from anthropic import beta_tool
 
-from buscar import cargar_env
+import config
+from buscar import RESULTADOS, cargar_env, leer
 from fuentes import seats_aero
+from fuentes.combinar import combinar
 
 MODELO = "claude-opus-5-5"
 
-SISTEMA = """Sos un agente de viajes experto en canje de millas, especializado en Air Europa (UX, SkyTeam).
-El usuario busca vuelos de Air Europa pagando con millas, por defecto en julio de 2027.
+SISTEMA = f"""Sos un agente de viajes experto en canje de millas, especializado en Air Europa (UX, SkyTeam).
+
+Perfil del viajero (de config.py):
+- Saldo: {config.MILLAS_DISPONIBLES:,} millas {config.PROGRAMA} (programa propio de Air Europa).
+- Ruta: {config.ORIGEN} (Córdoba, Argentina) -> {config.DESTINO} (Valencia, España), ida y vuelta.
+- Ventana: salida desde {config.VENTANA_DESDE}, regreso a más tardar el {config.VENTANA_HASTA}.
+- Air Europa vuela directo Córdoba-Madrid y conecta a Valencia en Madrid, todo con UX.
 
 Cómo trabajar:
-- Convertí ciudades a códigos IATA (Buenos Aires = EZE, Madrid = MAD, etc.). Si hay varios aeropuertos útiles, buscá con todos separados por coma.
-- Usá `buscar_premios` para todo el rango de fechas de una vez; no consultes día por día.
-- Si el usuario quiere ida y vuelta, hacé dos búsquedas (ida y regreso).
-- Para las mejores 2-3 opciones, pedí `detalle_vuelos` y mostrá números de vuelo, horarios, escalas y tasas.
-- Presentá una tabla corta ordenada por millas y explicá con qué programa conviene emitir.
-- Aclarale que seats.aero es un caché: la disponibilidad se confirma en la web del programa antes de transferir millas.
-- Recordale que con millas SUMA (programa propio de Air Europa) el precio es dinámico y se consulta en aireuropa.com
-  (modo `python buscar.py capturar` / `repetir` de este proyecto); las búsquedas de seats.aero muestran el cupo de socios SkyTeam.
+- La fuente principal son las búsquedas SUMA en aireuropa.com, que el usuario corre con
+  `python buscar.py repetir --tramo ida` y `--tramo vuelta`. Leelas con `combinar_suma`.
+  Si faltan, explicale los pasos (`capturar` y `repetir` para cada tramo) en vez de inventar datos.
+- Priorizá combinaciones ida+vuelta que entren en el saldo; si ninguna entra, decí cuántas millas faltan
+  y proponé alternativas: solo ida, mover fechas, salir desde Buenos Aires (EZE), o comprar millas en promo.
+- `buscar_premios` (seats.aero) muestra cupo de socios SkyTeam (Flying Blue, Delta...): sirve como referencia,
+  pero el usuario tiene millas SUMA, así que no lo presentes como canjeable con su saldo.
+- Recordá que las tasas se pagan aparte en efectivo y que hay que confirmar en aireuropa.com antes de emitir.
 - No inventes disponibilidad ni precios: si una herramienta falla o no hay resultados, decilo.
-Respondé en español rioplatense, claro y concreto."""
+Presentá una tabla corta ordenada por millas. Respondé en español rioplatense, claro y concreto."""
+
+
+@beta_tool
+def combinar_suma(min_dias: int = 1, max_dias: int = 0) -> str:
+    """Lee los resultados SUMA guardados (ida y vuelta) y devuelve las combinaciones que entran en el saldo.
+
+    Args:
+        min_dias: Estadía mínima en días.
+        max_dias: Estadía máxima en días (0 = sin límite).
+    """
+    try:
+        idas, vueltas = leer("suma_ida"), leer("suma_vuelta")
+    except SystemExit as e:
+        return f"Todavía no hay resultados SUMA en {RESULTADOS}: {e}"
+    combos = combinar(idas, vueltas, config.MILLAS_DISPONIBLES, min_dias, max_dias or None)
+    baratos = lambda filas: sorted(filas, key=lambda o: int(o["millas"]))[:10]
+    return json.dumps(
+        {"saldo": config.MILLAS_DISPONIBLES, "combinaciones": combos[:30], "idas_mas_baratas": baratos(idas), "vueltas_mas_baratas": baratos(vueltas)},
+        ensure_ascii=False,
+    )
 
 
 @beta_tool
 def buscar_premios(
     origen: str,
     destino: str,
-    fecha_desde: str = "2027-07-01",
-    fecha_hasta: str = "2027-07-31",
+    fecha_desde: str = config.VENTANA_DESDE,
+    fecha_hasta: str = config.VENTANA_HASTA,
     cabina: str = "economy",
     solo_directos: bool = False,
 ) -> str:
@@ -86,7 +113,7 @@ def responder(cliente: anthropic.Anthropic, historial: list) -> None:
         output_config={"effort": "medium"},
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
-        tools=[buscar_premios, detalle_vuelos],
+        tools=[combinar_suma, buscar_premios, detalle_vuelos],
         thread=False,  # mandamos el historial completo; lo llevamos nosotros entre turnos
         messages=list(historial),
     )
@@ -111,7 +138,7 @@ def main() -> None:
     cliente = anthropic.Anthropic()
     historial: list = []
     primera = " ".join(sys.argv[1:])
-    print("Agente de viajes Air Europa con millas. Escribí 'salir' para terminar.\n")
+    print(f"Agente de viajes Air Europa: {config.ORIGEN} -> {config.DESTINO} con {config.MILLAS_DISPONIBLES} millas {config.PROGRAMA}. Escribí 'salir' para terminar.\n")
     while True:
         texto = primera or input("Vos: ").strip()
         primera = ""

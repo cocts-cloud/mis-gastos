@@ -4,10 +4,11 @@ Air Europa no ofrece una API pública para canjear millas SUMA. Este módulo
 usa un navegador real (Playwright) en dos pasos:
 
 1. `capturar`: abre Chromium con un perfil propio. Vos iniciás sesión en SUMA
-   y hacés UNA búsqueda "pagar con millas". El script guarda todas las
+   y hacés UNA búsqueda solo ida "pagar con millas" (una para la ida y
+   otra para la vuelta). El script guarda todas las
    respuestas JSON que la web recibe (en capturas/) y la petición de búsqueda.
 2. `repetir`: reutiliza esa petición con tus cookies, cambiando la fecha día
-   por día (p. ej. todo julio de 2027), y extrae los precios en millas.
+   por día (toda tu ventana de viaje), y extrae los precios en millas.
 
 La web de Air Europa cambia seguido y tiene protección anti-bots: si algo
 falla, revisá las capturas y ajustá PALABRAS_BUSQUEDA / _extraer_ofertas.
@@ -26,12 +27,17 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parent.parent
 PERFIL = RAIZ / "perfil-navegador"
 CAPTURAS = RAIZ / "capturas"
-PETICION = CAPTURAS / "peticion_busqueda.json"
+
+
+def _peticion(nombre: str) -> Path:
+    return CAPTURAS / f"peticion_{nombre}.json"
+
 
 URL_INICIO = "https://www.aireuropa.com/"
 # Fragmentos de URL que suelen tener las llamadas de búsqueda de vuelos.
 PALABRAS_BUSQUEDA = ("availability", "search", "flights", "offers", "calendar", "fares")
 RE_FECHA = re.compile(r"\d{4}-\d{2}-\d{2}")
+RE_FECHA_COMPACTA = re.compile(r"(?<!\d)20\d{2}[01]\d[0-3]\d(?!\d)")
 
 
 def _es_busqueda(url: str) -> bool:
@@ -39,7 +45,8 @@ def _es_busqueda(url: str) -> bool:
     return "aireuropa" in u and any(p in u for p in PALABRAS_BUSQUEDA)
 
 
-def capturar() -> None:
+def capturar(nombre: str = "ida") -> None:
+    """Guarda la búsqueda que hagas a mano en el navegador bajo `nombre` (ida / vuelta)."""
     from playwright.sync_api import sync_playwright
 
     CAPTURAS.mkdir(exist_ok=True)
@@ -59,12 +66,12 @@ def capturar() -> None:
             except Exception:
                 return
             n += 1
-            (CAPTURAS / f"respuesta_{n:03d}.json").write_text(
+            (CAPTURAS / f"{nombre}_respuesta_{n:03d}.json").write_text(
                 json.dumps({"url": resp.url, "cuerpo": cuerpo}, ensure_ascii=False, indent=2)
             )
             req = resp.request
-            if req.post_data and RE_FECHA.search(req.post_data + req.url):
-                PETICION.write_text(
+            if RE_FECHA.search((req.post_data or "") + req.url) or RE_FECHA_COMPACTA.search((req.post_data or "") + req.url):
+                _peticion(nombre).write_text(
                     json.dumps(
                         {"metodo": req.method, "url": req.url, "headers": req.headers, "cuerpo": req.post_data},
                         ensure_ascii=False,
@@ -76,12 +83,12 @@ def capturar() -> None:
         pagina.on("response", al_responder)
         pagina.goto(URL_INICIO)
         print(
-            "\n1) Iniciá sesión en SUMA.\n2) Buscá un vuelo marcando 'Pagar con millas'.\n"
+            f"\n1) Iniciá sesión en SUMA.\n2) Buscá un vuelo SOLO IDA ({nombre}) marcando 'Pagar con millas'.\n"
             "3) Cuando veas los resultados, volvé acá y apretá Enter.\n"
         )
         input()
         ctx.close()
-    print(f"Listo: {n} respuestas en {CAPTURAS}. Petición de búsqueda: {'sí' if PETICION.exists() else 'no encontrada'}")
+    print(f"Listo: {n} respuestas en {CAPTURAS}. Petición de búsqueda '{nombre}': {'sí' if _peticion(nombre).exists() else 'no encontrada'}")
 
 
 def _extraer_ofertas(nodo, fecha: str, salida: list[dict]) -> None:
@@ -108,14 +115,22 @@ def _extraer_ofertas(nodo, fecha: str, salida: list[dict]) -> None:
             _extraer_ofertas(v, fecha, salida)
 
 
-def repetir(fecha_desde: str, fecha_hasta: str, pausa_seg: float = 6.0) -> list[dict]:
-    """Repite la búsqueda capturada para cada día del rango usando tu sesión."""
+def _reemplazar_fecha(texto: str, original: str, nueva: date) -> str:
+    if "-" in original:
+        return texto.replace(original, nueva.isoformat())
+    return texto.replace(original, nueva.strftime("%Y%m%d"))
+
+
+def repetir(fecha_desde: str, fecha_hasta: str, pausa_seg: float = 6.0, nombre: str = "ida") -> list[dict]:
+    """Repite la búsqueda capturada `nombre` para cada día del rango usando tu sesión."""
     from playwright.sync_api import sync_playwright
 
-    if not PETICION.exists():
-        raise RuntimeError("Primero corré: python buscar.py capturar")
-    plantilla = json.loads(PETICION.read_text())
-    fecha_original = RE_FECHA.search(plantilla["cuerpo"] or plantilla["url"]).group(0)
+    if not _peticion(nombre).exists():
+        raise RuntimeError(f"Primero corré: python buscar.py capturar --tramo {nombre}")
+    plantilla = json.loads(_peticion(nombre).read_text())
+    texto = (plantilla["cuerpo"] or "") + plantilla["url"]
+    encontrada = RE_FECHA.search(texto) or RE_FECHA_COMPACTA.search(texto)
+    fecha_original = encontrada.group(0)
     headers = {k: v for k, v in plantilla["headers"].items() if not k.startswith(":") and k.lower() not in ("content-length", "cookie")}
 
     d, fin = date.fromisoformat(fecha_desde), date.fromisoformat(fecha_hasta)
@@ -127,10 +142,10 @@ def repetir(fecha_desde: str, fecha_hasta: str, pausa_seg: float = 6.0) -> list[
         while d <= fin:
             f = d.isoformat()
             resp = ctx.request.fetch(
-                plantilla["url"].replace(fecha_original, f),
+                _reemplazar_fecha(plantilla["url"], fecha_original, d),
                 method=plantilla["metodo"],
                 headers=headers,
-                data=(plantilla["cuerpo"] or "").replace(fecha_original, f) or None,
+                data=_reemplazar_fecha(plantilla["cuerpo"] or "", fecha_original, d) or None,
             )
             if resp.ok:
                 try:
